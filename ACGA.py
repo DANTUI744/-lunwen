@@ -30,32 +30,33 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 def get_parser():
     parser = argparse.ArgumentParser(description='Description: Script to run our model.')
-    parser.add_argument('--dataset', help='Cora, Citeseer or Pubmed. Default=Cora', default='Cora')
-    parser.add_argument('--hidden_size', type=int, help='hidden size', default=128)
-    parser.add_argument('--emb_size', type=int, help='gae/vgae embedding size', default=32)
-    parser.add_argument('--spliter', help='spliter method.Default=random_spliter (rand_walk)', default="random_spliter")
-    parser.add_argument('--gae', type=str2bool, help='whether use GAE ', default=True)
-    parser.add_argument('--use_bns', type=str2bool, help='whether use bns for GNN layer ', default=True)
-    parser.add_argument('--task', type=int, help='node cls = 0, edge predict = 1', default=0)
+    parser.add_argument('--dataset', help='Cora, Citeseer or Pubmed. Default=Cora', default='Cora')  # 指定数据集
+    parser.add_argument('--hidden_size', type=int, help='hidden size', default=128)  # 模型隐藏层大小
+    parser.add_argument('--emb_size', type=int, help='gae/vgae embedding size', default=32)  # 嵌入维度
+    parser.add_argument('--spliter', help='spliter method.Default=random_spliter (rand_walk)', default="random_spliter")  # 数据划分方法
+    parser.add_argument('--gae', type=str2bool, help='whether use GAE ', default=True)  # 是否使用图自编码器
+    parser.add_argument('--use_bns', type=str2bool, help='whether use bns for GNN layer ', default=True)  # 是否在GNN层使用批归一化
+    parser.add_argument('--task', type=int, help='node cls = 0, edge predict = 1', default=0)  # 任务类型
     parser.add_argument('--alpha', type=float, default=0.4)  # 0.32
     parser.add_argument('--beta', type=float, default=0.7)  # 5.85
     parser.add_argument('--gamma', type=float, default=2.85)  # 1.9
     # 补充 subgraph_size 参数（关键修改）
     parser.add_argument('--subgraph_size', type=int, default=200,  # 类型为整数，默认值64（可根据数据调整）
-                        help='Size of subgraph used in training (adjust based on your dataset)')
+                        help='Size of subgraph used in training (adjust based on your dataset)')  # 子图大小
     return parser
 
-
+# 表征学习部分，专注于模型“表征学习”阶段（让模型学习图数据中节点/边的有效特征表示），
+# 通过组合多种损失函数，优化模型对吐图结构和语义的理解
 def train_rep(model, data, num_classes, alpha=0.5, beta=3.0, gamma=2.0, train_edge=None, new_label=None):
-    # train_rep函数用于训练模型的学习部分，通过多轮迭代优化模型参数
+    # train_edge训练用的边数据（用于边相关的损失计算）
     # model为待训练的ACGA模型，train_rep为训练加载器(批次数据)，optimizer 为优化器
-    # criterion为损失函数，epochs为训练轮数
+    # criterion为损失函数
     model.train()  # 将模型设为训练模式（启用dropout、批归一化更新什么的）
-    batch = data.to(device)
+    batch = data.to(device)  # 把数据放到GPU/CPU上
     if isinstance(new_label, np.ndarray):
         label_all = new_label
     else:
-        label_all = batch.y
+        label_all = batch.y  # 没有外部标签时，用图数据自带的标签
     # ############### need delet
     # label_all = batch.y
     # ############### need delet
@@ -63,36 +64,47 @@ def train_rep(model, data, num_classes, alpha=0.5, beta=3.0, gamma=2.0, train_ed
     alpha = alpha  # MAX: Cora: 0.5,3,2,300,83.6,    0.58,  0.65,  3.4000,
     beta = beta  # 2
     gamma = gamma  # 2
+    # 根据是否传入train_edge，选择不同方式获取模型的中间输入和协同损失（loss_co）
     if train_edge is not None:
+        # 若有，从train_edge中提取正边的索引train_pos_edge_index并传入model.train_present函数，
+        # 让模型基于这些正边计算特征和损失
         adj = train_edge.train_pos_edge_index
         summary, summary_pos, summary_neg, loss_co = model.train_present(batch, label_all, adj)
     else:
+        # 若无，直接用图数据自带的标签，label_all调用model.train_present
+        # 让模型基于节点标签等信息计算特征和损失
         summary, summary_pos, summary_neg, loss_co = model.train_present(batch, label=label_all)
+        # 协同损失是一类用于约束“正样本对”在特征空间中表现特定关联的损失函数
     loss_s = loss_means(summary, label_all, num_classes)
+    # 结构损失让模型学习图的“结构特征”（比如节点分类的类别信息）
     loss_cl = torch.nn.functional.triplet_margin_loss(summary, summary_pos, summary_neg, reduction='mean')
-    loss = beta * ((1 - alpha) * loss_cl + alpha * loss_co) + loss_s * gamma
+    # 对比损失，让正样本对的表征更接近，负样本对的表征更疏远
+    loss = beta * ((1 - alpha) * loss_cl + alpha * loss_co) + loss_s * gamma  # 计算中损失
     return loss
 
-
+# train_cls作用是训练模型完成节点分类任务，通过计算损失来优化模型参数，使模型能够学习到图中节点的特征并准确预测节点类别
 def train_cls(model, data, args, criterion, optimizer, epoch):
-    model.train()
-    batch = data.to(device)
-    label_all = batch.y
-    predict = model(batch)
+    # arg 包含一些配置参数 criterion 损失函数 optimizer 优化器
+    model.train()  # 训练模式
+    batch = data.to(device)  # 将数据转移到指定设备
+    label_all = batch.y  # 获取所有节点的标签
+    predict = model(batch)  # 模型前向传播得到预测结果【将图数据输入模型，得到模型对每个节点类别的预测结果】（？）
     # predict = model.forward_emb(batch, embedding)
+    # 条件判断：子图大小匹配与否。判断当前图的节点数量是否恰好等于配置的子图大小
     if data.x.size(0) == args.subgraph_size:
-        loss_nc = criterion(predict, label_all)
-    else:
-        predict = predict[batch.train_mask]
-        label = batch.y[batch.train_mask]
+        loss_nc = criterion(predict, label_all)  # 子图大小完全匹配——用所有节点计算损失
+    else:  # 子图大小不匹配-说明当前处理的是“更大图的一部分”，因此只筛选出训练集对应节点
+        predict = predict[batch.train_mask]  # batch.train_mask是一个布尔掩码，标记哪些节点属于“训练集”
+        # predict[batch.train_mask]从所有的节点预测结果中，筛选出训练集节点的预测
+        label = batch.y[batch.train_mask]  # batch.y[batch.train_mask]从所有结点的真实标签中，筛选出训练集节点的标签
         loss_nc = criterion(predict, label)
-    # if epoch % 20 == 0:
+    # if epoch % 20 == 0: //每20个epoch打印一次损失
     # print(f'epoch: {epoch} loss_nc:{loss_nc:.4f}')
     # loss_nc = loss_nc
-    # loss_nc.backward()
-    # optimizer.step()
+    # loss_nc.backward()  # 损失反向传播，计算模型参数的梯度
+    # optimizer.step()  # 优化器根据梯度更新模型参数
 
-    # return loss_nc.item()
+    # return loss_nc.item()  # 返回损失的“纯数值”
     return loss_nc
 
 
@@ -136,7 +148,7 @@ def test_ep(model, data, train_edge):
     adj_logit = model(data, adj)
 
     # 新增：打印预测值的标准差（衡量波动程度）
-    print(f"模型预测值标准差：{adj_logit.std().item():.4f}")  # 标准差应>0
+   # print(f"模型预测值标准差：{adj_logit.std().item():.4f}")  # 标准差应>0
 
     val_edges = torch.cat((train_edge.val_pos_edge_index, train_edge.val_neg_edge_index), axis=1).cpu().numpy()
     val_edge_labels = np.concatenate(
@@ -244,7 +256,7 @@ def main(train_edge=None):
     nc_criterion = torch.nn.CrossEntropyLoss()
     num = 11  # 训练轮数（重复训练10次，取平均值，减少随机波动对结果的影响）
 
-    # 初始化模ACGA模型（核心！根据任务类型适配模型结构）
+    # 初始化模ACGA模型【调用GCN_Net类的构造函数，用于实例化一个图卷积网络（GCN）模型】
     model = GCN_Net(feature_size,  # 输入特征维度
                     num_classes,  # 类别数（节点分类任务用，边预测任务可忽略）
                     hidden=args.hidden_size,  # GCN隐藏层维度（命令行参数指定，如32/64）
@@ -302,7 +314,7 @@ def main(train_edge=None):
             print(f'num = {weight}, best_val_acc = {best_val_acc * 100:.1f}%, '
                   f'last_test_acc = {last_test_acc * 100:.1f}%')
         else:
-            lr, weight_decay = 5e-4, 5e-4  # 5e-4
+            lr, weight_decay = 1e-4, 5e-4  # 5e-4
             # 早停与性能指标（边预测关注AUC和AP两个指标）
             best_val_acc, best_val_ap, last_test_acc, last_test_ap, early_stop, patience = 0, 0, 0, 0, 0, 200
             model.reset_parameters()  # 重置模型参数
@@ -320,8 +332,12 @@ def main(train_edge=None):
                 # 4.反向传播与参数更新（同节点分类，含梯度裁剪）
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)  # 限制梯度范围
-                optimizer_ep.step()
+                # PyTorch中优化模型参数的核心操作，通常与损失函数的反向传播（loss.backward()）配合使用，共同完成
+                # ”计算梯度-更新参数-清空梯度“的训练循环
+                optimizer_ep.step()  # 根据梯度更新模型参数
                 optimizer_ep.zero_grad()
+                # 清空梯度，在PyTorch中，梯度是”累加“的（即每次调用loss。backward()梯度会叠加到上一次的梯度上）
+                #若不清空，下一轮训练的梯度会包含上一轮的残留值，导致参数更新错误。
 
                 # 5.验证模型（计算边预测AUC和AP指标）
                 with torch.no_grad():
@@ -339,16 +355,24 @@ def main(train_edge=None):
             # 打印单次训练结果（同时展示AUC和AP）
             print(f'wight = {weight}, best_val_auc = {best_val_acc * 100:.1f}%, best_val_ap = {best_val_ap * 100:.1f}% '
                   f'last_test_auc = {last_test_acc * 100:.1f}%, last_test_ap = {last_test_ap * 100:.1f}%')
-        # 记录边预测专属结果
-        val_acc_list.append(best_val_acc)
-        test_acc_list.append(last_test_acc)
+        # 记录边预测专属结果，将验证集和测试集上的准确率，AP(平均精度)等关键结果保存到列表中，方便后续分析或输出
+        val_acc_list.append(best_val_acc)  # best_val_acc 验证集上的”最佳准确率“
+        test_acc_list.append(last_test_acc)  # last_test_acc 对应最佳验证集模型在测试集上的准确率
+        # 是两个列表，用于分别存储验证集和测试集上的准确率
+        # 记录AP结果
         if args.task == 1:
             val_ap_list.append(best_val_ap)
             test_ap_list.append(last_test_ap)
+
     # 计算10次训练的平均准确率和标准差（统计显著性分析）
-    avg_val_acc = statistics.mean(val_acc_list)
-    avg_test_acc = statistics.mean(test_acc_list)
-    std_acc = np.std(np.array(test_acc_list))
+
+    avg_val_acc = statistics.mean(val_acc_list)  # 验证集准确率的平均值
+    # val_acc_list是一个列表，存储了多次实验中，验证机上的准确率结果
+    # statistics.mean() python标准库中的函数，用于计算列表中所有数值的算术平均值
+    avg_test_acc = statistics.mean(test_acc_list)  # 计算测试机准确率的平均值
+    std_acc = np.std(np.array(test_acc_list))  # 计算测试机准确率的标准差
+    # np.array(test_acc_list) 将存储测试机准确率的列表转换为Numpy数组
+    # np.std()用于计算数组的标准差
     # 若为边预测任务，需要额外统计AP指标
     if args.task == 1:
         avg_val_ap = statistics.mean(val_ap_list)

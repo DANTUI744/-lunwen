@@ -21,7 +21,7 @@ from torch_sparse import SparseTensor, fill_diag, matmul, mul
 
 from lib import eval_edge_pred, setup_seed
 
-
+# 定义了GCN_Net类，该类包含了模型的初始化，参数重置，训练过程，前向传播等方法，用于处理图数据相关任务
 class GCN_Net(torch.nn.Module):
     r""" GCN model from the "Semi-supervised Classification with Graph
     Convolutional Networks" paper, in ICLR'17.
@@ -34,7 +34,9 @@ class GCN_Net(torch.nn.Module):
         dropout (float): dropout ratio, default=.0.
 
     """
-
+    # 图模型的初始化方法（_init_）用于图卷积网络模型的核心组件和参数，是模型搭建的”骨架“，
+    # 首先是接受并保存初始化参数
+    # 构建一个融合GCN(图卷积网络)和VGAE(边粪土编码器)的图学习模型，支持节点分类和边预测
     def __init__(self,
                  in_channels,
                  out_channels,
@@ -43,22 +45,33 @@ class GCN_Net(torch.nn.Module):
                  dropout=.0,
                  gae=True,
                  use_bns=True,
-                 task=0):
-        super(GCN_Net, self).__init__()
-        self.gae = gae
-        self.use_bns = use_bns
-        self.task = task
+                 task=0):  # 参数定义
+        # 继承父类与基础属性初始化
+        super(GCN_Net, self).__init__()  # 调用父类的初始化方法
+        self.gae = gae  # 保存是否使用GAE的标志
+        self.use_bns = use_bns  # 保存是否使用批归一化的标志
+        self.task = task  # 保存任务类型
         # 新增：定义device属性（自动适配CPU/GPU）
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        # 核心网络组件
+        # 主GCN层
         self.cons = GCNLayer(input_dim=in_channels, output_dim=hidden, activation=F.relu, dropout=dropout)
+        # 作为模型的”主干“，负责从节点原始特征中提取基础特征（通过聚合邻居节点）
+        # 输入维度为in_channels（原始特征）输出维度为hidden（隐藏层特征），使用 ReLU 激活函数引入非线性，同时应用dropout防止过拟合。
         self.conv_pos = VGAE(input_dim=in_channels, output_dim=emb_size, dim_z=hidden, dropout=dropout, gae=self.gae)
         self.conv_neg = VGAE(input_dim=in_channels, output_dim=emb_size, dim_z=hidden, dropout=dropout, gae=self.gae)
+        # 正/负样本VGAE模块
+        # 是”图增强“的核心，分别用于生成”正样本增强图“，和”负样本增强图“的节点特征
+        # 基于变分自编码器（VAE）的思想，输入原始节点特征，输出维度为emb_size（节点嵌入），dim_z是潜在变量维度，gae参数控制是否使用 GAE（图自编码器）模式。
         self.bns = torch.nn.BatchNorm1d(hidden)
+        # 拟归一化层，对GCN输出的隐藏层特征（hidden）进行批归一化。让每层输入的特征分布更稳定。减少训练波动，加速模型收敛
+        # 辅助信息
         self.dropout = dropout
-        self.graph_pos_edge, self.graph_neg_edge = None, None
-        self.pos_adj_norm, self.neg_adj_norm = None, None
-        self.pos_weight, self.neg_weight = None, None
-        self.adj_pos, self.adj_neg, self.adj = None, None, None
+        self.graph_pos_edge, self.graph_neg_edge = None, None  # 存储正/负样本图的边信息
+        self.pos_adj_norm, self.neg_adj_norm = None, None  # 存储归一化后的正/负邻接矩阵
+        self.pos_weight, self.neg_weight = None, None  # 存储正/负样本的权重（用于损失计算）
+        self.adj_pos, self.adj_neg, self.adj = None, None, None  # 存储正/负原图的邻接矩阵
+        # 这些属性在模型训练过程中动态赋值，用于临时存储图的结构信息（边，邻接矩阵），方便计算和特证聚合
         if self.task == 0:
             self.cls = GCNLayer(input_dim=hidden, output_dim=out_channels, activation=0, dropout=0)
         else:
