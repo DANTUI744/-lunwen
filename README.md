@@ -26,7 +26,7 @@ pip install -r requirements.txt
 #### Run parameter search node classification：
 
 ```
-python optuna_ACGA.py --dataset combined --hidden_size 128 --emb_size 32 --gae 0 --use_bns True --task 0
+python optuna_ACGA.py --dataset population --hidden_size 128 --emb_size 32 --gae 0 --use_bns True --task 0
 ```
 
 #### Run parameter search link prediction：
@@ -40,7 +40,7 @@ python optuna_ACGA.py --dataset combined --hidden_size 32 --emb_size 16 --gae 0 
 #### Run the node classification task：
 
 ```
-python ACGA.py --dataset combined --hidden_size 128 --emb_size 32 --gae 0 --use_bns True --task 0
+python ACGA.py --dataset population --hidden_size 128 --emb_size 32 --gae 0 --use_bns True --task 0
 ```
 
 #### Run the link prediction task：
